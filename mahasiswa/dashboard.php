@@ -2,7 +2,206 @@
 
 $pageTitle = 'Dashboard';
 $activePage = 'dashboard';
-require_once 'templates/header_mahasiswa.php'; 
+require_once 'templates/header_mahasiswa.php';
+require_once '../config.php'; // Pastikan path ke config.php benar
+
+$user_id = $_SESSION['user_id'];
+
+// --- Ambil Data Statistik dari Database ---
+
+// 1. Praktikum Diikuti (Total enrollments oleh mahasiswa ini)
+$total_praktikum_diikuti = 0;
+$sql_praktikum_diikuti = "SELECT COUNT(*) AS total FROM enrollments WHERE user_id = ?";
+$stmt_praktikum_diikuti = $conn->prepare($sql_praktikum_diikuti);
+if ($stmt_praktikum_diikuti) {
+    $stmt_praktikum_diikuti->bind_param("i", $user_id);
+    $stmt_praktikum_diikuti->execute();
+    $result_praktikum_diikuti = $stmt_praktikum_diikuti->get_result();
+    if ($result_praktikum_diikuti && $result_praktikum_diikuti->num_rows > 0) {
+        $row = $result_praktikum_diikuti->fetch_assoc();
+        $total_praktikum_diikuti = $row['total'];
+    }
+    $stmt_praktikum_diikuti->close();
+} else {
+    error_log("Failed to prepare statement for total_praktikum_diikuti: " . $conn->error);
+}
+
+
+// 2. Tugas Selesai (Total submissions dengan status 'graded')
+$total_tugas_selesai = 0;
+$sql_tugas_selesai = "SELECT COUNT(DISTINCT s.id) AS total 
+                      FROM submissions s
+                      JOIN modules m ON s.module_id = m.id
+                      JOIN enrollments e ON m.course_id = e.course_id AND e.user_id = s.user_id
+                      WHERE s.user_id = ? AND s.status = 'graded'";
+$stmt_tugas_selesai = $conn->prepare($sql_tugas_selesai);
+if ($stmt_tugas_selesai) {
+    $stmt_tugas_selesai->bind_param("i", $user_id);
+    $stmt_tugas_selesai->execute();
+    $result_tugas_selesai = $stmt_tugas_selesai->get_result();
+    if ($result_tugas_selesai && $result_tugas_selesai->num_rows > 0) {
+        $row = $result_tugas_selesai->fetch_assoc();
+        $total_tugas_selesai = $row['total'];
+    }
+    $stmt_tugas_selesai->close();
+} else {
+    error_log("Failed to prepare statement for total_tugas_selesai: " . $conn->error);
+}
+
+
+// 3. Tugas Menunggu (Total submissions dengan status 'submitted' atau modul yang belum dikumpulkan dan due_date belum lewat)
+$total_tugas_menunggu = 0;
+// Submissions yang sudah dikumpulkan tapi belum dinilai
+$sql_submitted_pending = "SELECT COUNT(*) AS total FROM submissions WHERE user_id = ? AND status = 'submitted'";
+$stmt_submitted_pending = $conn->prepare($sql_submitted_pending);
+if ($stmt_submitted_pending) {
+    $stmt_submitted_pending->bind_param("i", $user_id);
+    $stmt_submitted_pending->execute();
+    $result_submitted_pending = $stmt_submitted_pending->get_result();
+    if ($result_submitted_pending && $result_submitted_pending->num_rows > 0) {
+        $row = $result_submitted_pending->fetch_assoc();
+        $total_tugas_menunggu += $row['total'];
+    }
+    $stmt_submitted_pending->close();
+} else {
+    error_log("Failed to prepare statement for submitted_pending: " . $conn->error);
+}
+
+
+// Modul yang belum dikumpulkan dan due_date belum lewat
+$sql_modules_not_submitted_yet = "
+    SELECT COUNT(m.id) AS total
+    FROM modules m
+    JOIN enrollments e ON m.course_id = e.course_id
+    LEFT JOIN submissions s ON m.id = s.module_id AND s.user_id = e.user_id
+    WHERE e.user_id = ?
+    AND s.id IS NULL -- Belum ada submission
+    AND (m.due_date IS NULL OR m.due_date >= NOW()) -- Due date belum lewat atau tidak ada due date
+";
+$stmt_modules_not_submitted_yet = $conn->prepare($sql_modules_not_submitted_yet);
+if ($stmt_modules_not_submitted_yet) {
+    $stmt_modules_not_submitted_yet->bind_param("i", $user_id);
+    $stmt_modules_not_submitted_yet->execute();
+    $result_modules_not_submitted_yet = $stmt_modules_not_submitted_yet->get_result();
+    if ($result_modules_not_submitted_yet && $result_modules_not_submitted_yet->num_rows > 0) {
+        $row = $result_modules_not_submitted_yet->fetch_assoc();
+        $total_tugas_menunggu += $row['total'];
+    }
+    $stmt_modules_not_submitted_yet->close();
+} else {
+    error_log("Failed to prepare statement for modules_not_submitted_yet: " . $conn->error);
+}
+
+
+// --- Ambil Notifikasi Terbaru dari Database ---
+$notifications = [];
+
+// Notifikasi: Nilai baru diberikan
+$sql_new_grades = "
+    SELECT 
+        g.graded_at AS date,
+        'grade' AS type,
+        m.module_name,
+        c.course_name,
+        g.grade_value
+    FROM grades g
+    JOIN submissions s ON g.submission_id = s.id
+    JOIN modules m ON s.module_id = m.id
+    JOIN courses c ON m.course_id = c.id
+    WHERE s.user_id = ?
+    ORDER BY g.graded_at DESC
+    LIMIT 3"; // Ambil 3 notifikasi nilai terbaru
+$stmt_new_grades = $conn->prepare($sql_new_grades);
+if ($stmt_new_grades) {
+    $stmt_new_grades->bind_param("i", $user_id);
+    $stmt_new_grades->execute();
+    $result_new_grades = $stmt_new_grades->get_result();
+    while ($row = $result_new_grades->fetch_assoc()) {
+        $notifications[] = [
+            'icon' => '🔔',
+            'message' => 'Nilai untuk <a href="course_detail.php?id=' . htmlspecialchars($row['course_id'] ?? '') . '" class="font-semibold text-blue-600 hover:underline">' . htmlspecialchars($row['module_name']) . '</a> pada praktikum ' . htmlspecialchars($row['course_name']) . ' telah diberikan: <span class="font-bold">' . htmlspecialchars($row['grade_value']) . '</span>.',
+            'timestamp' => strtotime($row['date'])
+        ];
+    }
+    $stmt_new_grades->close();
+} else {
+    error_log("Failed to prepare statement for new grades: " . $conn->error);
+}
+
+
+// Notifikasi: Batas waktu pengumpulan akan datang (dalam 7 hari ke depan)
+$sql_upcoming_due_dates = "
+    SELECT 
+        m.module_name,
+        m.due_date,
+        c.course_name,
+        c.id AS course_id
+    FROM modules m
+    JOIN enrollments e ON m.course_id = e.course_id
+    LEFT JOIN submissions s ON m.id = s.module_id AND s.user_id = e.user_id
+    WHERE e.user_id = ?
+    AND s.id IS NULL -- Belum dikumpulkan
+    AND m.due_date IS NOT NULL
+    AND m.due_date >= NOW()
+    AND m.due_date <= DATE_ADD(NOW(), INTERVAL 7 DAY)
+    ORDER BY m.due_date ASC
+    LIMIT 3"; // Ambil 3 notifikasi batas waktu terbaru
+$stmt_upcoming_due_dates = $conn->prepare($sql_upcoming_due_dates);
+if ($stmt_upcoming_due_dates) {
+    $stmt_upcoming_due_dates->bind_param("i", $user_id);
+    $stmt_upcoming_due_dates->execute();
+    $result_upcoming_due_dates = $stmt_upcoming_due_dates->get_result();
+    while ($row = $result_upcoming_due_dates->fetch_assoc()) {
+        $notifications[] = [
+            'icon' => '⏳',
+            'message' => 'Batas waktu pengumpulan laporan untuk <a href="course_detail.php?id=' . htmlspecialchars($row['course_id']) . '" class="font-semibold text-blue-600 hover:underline">' . htmlspecialchars($row['module_name']) . '</a> pada praktikum ' . htmlspecialchars($row['course_name']) . ' adalah ' . date('d M Y H:i', strtotime($row['due_date'])) . '!',
+            'timestamp' => strtotime($row['due_date'])
+        ];
+    }
+    $stmt_upcoming_due_dates->close();
+} else {
+    error_log("Failed to prepare statement for upcoming due dates: " . $conn->error);
+}
+
+
+// Notifikasi: Pendaftaran praktikum baru (contoh, bisa diambil dari log atau event pendaftaran)
+// Untuk saat ini, kita bisa menggunakan data statis atau mengambil dari tabel enrollments terbaru
+$sql_new_enrollments = "
+    SELECT 
+        e.enrolled_at AS date,
+        c.course_name,
+        c.id AS course_id
+    FROM enrollments e
+    JOIN courses c ON e.course_id = c.id
+    WHERE e.user_id = ?
+    ORDER BY e.enrolled_at DESC
+    LIMIT 3"; // Ambil 3 notifikasi pendaftaran terbaru
+$stmt_new_enrollments = $conn->prepare($sql_new_enrollments);
+if ($stmt_new_enrollments) {
+    $stmt_new_enrollments->bind_param("i", $user_id);
+    $stmt_new_enrollments->execute();
+    $result_new_enrollments = $stmt_new_enrollments->get_result();
+    while ($row = $result_new_enrollments->fetch_assoc()) {
+        $notifications[] = [
+            'icon' => '✅',
+            'message' => 'Anda berhasil mendaftar pada mata praktikum <a href="course_detail.php?id=' . htmlspecialchars($row['course_id']) . '" class="font-semibold text-blue-600 hover:underline">' . htmlspecialchars($row['course_name']) . '</a>.',
+            'timestamp' => strtotime($row['date'])
+        ];
+    }
+    $stmt_new_enrollments->close();
+} else {
+    error_log("Failed to prepare statement for new enrollments: " . $conn->error);
+}
+
+
+// Urutkan notifikasi berdasarkan timestamp (terbaru di atas)
+usort($notifications, function($a, $b) {
+    return $b['timestamp'] <=> $a['timestamp'];
+});
+
+// Ambil hanya 5 notifikasi terbaru
+$notifications = array_slice($notifications, 0, 5);
+
 
 ?>
 
@@ -112,7 +311,7 @@ require_once 'templates/header_mahasiswa.php';
         align-items: flex-start; /* Sejajarkan item dengan ikon */
         padding: 15px 0; /* Padding vertikal */
         border-bottom: 1px solid #edf1f5; /* Garis pemisah antar notifikasi */
-        transition: background-color 0.2s ease; /* Transisi hover */
+        transition: background-color 0.2s ease; /* Transisi halus */
     }
 
     .notification-item:last-child {
@@ -210,17 +409,17 @@ require_once 'templates/header_mahasiswa.php';
 <div class="stats-grid">
     
     <div class="stat-card">
-        <div class="stat-value text-blue-600">3</div>
+        <div class="stat-value text-blue-600"><?php echo $total_praktikum_diikuti; ?></div>
         <div class="stat-label">Praktikum Diikuti</div>
     </div>
     
     <div class="stat-card">
-        <div class="stat-value text-green-500">8</div>
+        <div class="stat-value text-green-500"><?php echo $total_tugas_selesai; ?></div>
         <div class="stat-label">Tugas Selesai</div>
     </div>
     
     <div class="stat-card">
-        <div class="stat-value text-yellow-500">4</div>
+        <div class="stat-value text-yellow-500"><?php echo $total_tugas_menunggu; ?></div>
         <div class="stat-label">Tugas Menunggu</div>
     </div>
     
@@ -229,32 +428,24 @@ require_once 'templates/header_mahasiswa.php';
 <div class="notifications-section">
     <h3 class="text-2xl font-bold text-gray-800 mb-4">Notifikasi Terbaru</h3>
     <ul class="notification-list">
-        
-        <li class="notification-item">
-            <span class="notification-icon">🔔</span>
-            <div class="notification-text">
-                Nilai untuk <a href="#" class="font-semibold text-blue-600 hover:underline">Modul 1: HTML & CSS</a> telah diberikan.
-            </div>
-        </li>
-
-        <li class="notification-item">
-            <span class="notification-icon">⏳</span>
-            <div class="notification-text">
-                Batas waktu pengumpulan laporan untuk <a href="#" class="font-semibold text-blue-600 hover:underline">Modul 2: PHP Native</a> adalah besok!
-            </div>
-        </li>
-
-        <li class="notification-item">
-            <span class="notification-icon">✅</span>
-            <div class="notification-text">
-                Anda berhasil mendaftar pada mata praktikum <a href="#" class="font-semibold text-blue-600 hover:underline">Jaringan Komputer</a>.
-            </div>
-        </li>
-        
+        <?php if (!empty($notifications)): ?>
+            <?php foreach ($notifications as $notification): ?>
+                <li class="notification-item">
+                    <span class="notification-icon"><?php echo $notification['icon']; ?></span>
+                    <div class="notification-text">
+                        <?php echo $notification['message']; ?>
+                    </div>
+                </li>
+            <?php endforeach; ?>
+        <?php else: ?>
+            <li class="notification-item">
+                <div class="notification-text text-gray-500">Tidak ada notifikasi baru.</div>
+            </li>
+        <?php endif; ?>
     </ul>
 </div>
 
 <?php
 // Panggil Footer
 require_once 'templates/footer_mahasiswa.php';
-?>
+$conn->close();
