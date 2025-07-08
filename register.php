@@ -9,7 +9,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     $password = trim($_POST['password']);
     $role = trim($_POST['role']);
 
-    // Validasi sederhana
+    // Validasi sederhana input data 
     if (empty($nama) || empty($email) || empty($password) || empty($role)) {
         $message = "Semua kolom harus diisi!";
     } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
